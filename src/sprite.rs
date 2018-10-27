@@ -1,11 +1,18 @@
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use uuid::Uuid;
 
-use graphics::{ self, Graphics, ImageSize };
-use graphics::math::{ Scalar, Matrix2d, Vec2d };
+use graphics::math::{Matrix2d, Scalar, Vec2d};
 use graphics::types::SourceRectangle;
+use graphics::{self, Graphics, ImageSize};
+
+#[derive(Clone)]
+pub struct FrameSet {
+    pub repeat: bool,
+    pub frame_time: f64,
+    pub source: Vec<SourceRectangle>,
+}
 
 /// A sprite is a texture with some properties.
 pub struct Sprite<I: ImageSize> {
@@ -18,8 +25,7 @@ pub struct Sprite<I: ImageSize> {
     position: Vec2d,
     rotation: Scalar,
     scale: Vec2d,
-    color: [f32;3],
-
+    color: [f32; 3],
 
     flip_x: bool,
     flip_y: bool,
@@ -31,6 +37,12 @@ pub struct Sprite<I: ImageSize> {
 
     src_rect: Option<SourceRectangle>,
     texture: Rc<I>,
+
+    frames: Option<FrameSet>,
+    frames_followup: Option<String>,
+    frame_sets: HashMap<String, FrameSet>,
+    frame_idx: usize,
+    frame_delta: f64,
 }
 
 impl<I: ImageSize> Sprite<I> {
@@ -46,7 +58,7 @@ impl<I: ImageSize> Sprite<I> {
             position: [0.0, 0.0],
             rotation: 0.0,
             scale: [1.0, 1.0],
-            color: [1.0,1.0,1.0],
+            color: [1.0, 1.0, 1.0],
 
             flip_x: false,
             flip_y: false,
@@ -55,6 +67,12 @@ impl<I: ImageSize> Sprite<I> {
 
             texture: texture,
             src_rect: None,
+
+            frames: None,
+            frames_followup: None,
+            frame_idx: 0,
+            frame_delta: 0.0,
+            frame_sets: HashMap::new(),
 
             children: Vec::new(),
             children_index: HashMap::new(),
@@ -73,19 +91,25 @@ impl<I: ImageSize> Sprite<I> {
             position: [0.0, 0.0],
             rotation: 0.0,
             scale: [1.0, 1.0],
-            color: [1.0,1.0,1.0],
+            color: [1.0, 1.0, 1.0],
 
             flip_x: false,
             flip_y: false,
 
             opacity: 1.0,
 
+            frames: None,
+            frames_followup: None,
+            frame_idx: 0,
+            frame_delta: 0.0,
+            frame_sets: HashMap::new(),
+
             texture: texture,
             src_rect: From::from(src_rect),
 
             children: Vec::new(),
             children_index: HashMap::new(),
-        }        
+        }
     }
 
     /// Get the sprite's id
@@ -223,7 +247,7 @@ impl<I: ImageSize> Sprite<I> {
     pub fn get_src_rect(&self) -> Option<SourceRectangle> {
         self.src_rect
     }
-    
+
     /// Set the sprite's source rectangle
     #[inline(always)]
     pub fn set_src_rect(&mut self, src_rect: SourceRectangle) {
@@ -246,7 +270,8 @@ impl<I: ImageSize> Sprite<I> {
     pub fn add_child(&mut self, sprite: Sprite<I>) -> Uuid {
         let id = sprite.id();
         self.children.push(sprite);
-        self.children_index.insert(id.clone(), self.children.len() - 1);
+        self.children_index
+            .insert(id.clone(), self.children.len() - 1);
         id
     }
 
@@ -316,24 +341,35 @@ impl<I: ImageSize> Sprite<I> {
         let (tex_w, tex_h) = self.texture.get_size();
         let tex_w = tex_w as f64;
         let tex_h = tex_h as f64;
-        let source_rectangle = self.src_rect.unwrap_or({
-            let (w, h) = (tex_w, tex_h);
-            [0.0, 0.0, w as f64, h as f64]
-        });        
-        let anchor = [self.anchor[0] * source_rectangle[2], self.anchor[1] * source_rectangle[3]];
+        let source_rectangle = match self.frames {
+            None => self.src_rect.unwrap_or({
+                let (w, h) = (tex_w, tex_h);
+                [0.0, 0.0, w as f64, h as f64]
+            }),
+            Some(ref frame) => frame.source[self.frame_idx],
+        };
+        let anchor = [
+            self.anchor[0] * source_rectangle[2],
+            self.anchor[1] * source_rectangle[3],
+        ];
 
-        let transformed = t.trans(self.position[0], self.position[1])
-                           .rot_deg(self.rotation)
-                           .scale(self.scale[0], self.scale[1]);
+        let transformed = t
+            .trans(self.position[0], self.position[1])
+            .rot_deg(self.rotation)
+            .scale(self.scale[0], self.scale[1]);
 
         let mut model = transformed;
 
         if self.flip_x {
-            model = model.trans(source_rectangle[2] - 2.0 * anchor[0], 0.0).flip_h();
+            model = model
+                .trans(source_rectangle[2] - 2.0 * anchor[0], 0.0)
+                .flip_h();
         }
 
         if self.flip_y {
-            model = model.trans(0.0, source_rectangle[3] - 2.0 * anchor[1]).flip_v();
+            model = model
+                .trans(0.0, source_rectangle[3] - 2.0 * anchor[1])
+                .flip_v();
         }
 
         let ref draw_state: graphics::DrawState = Default::default();
@@ -343,8 +379,13 @@ impl<I: ImageSize> Sprite<I> {
 
         graphics::Image::new()
             .color([self.color[0], self.color[1], self.color[2], self.opacity])
-            .rect([-anchor[0], -anchor[1], source_rectangle[2], source_rectangle[3]])
-            .maybe_src_rect(self.src_rect)
+            .rect([
+                -anchor[0],
+                -anchor[1],
+                source_rectangle[2],
+                source_rectangle[3],
+            ])
+            .maybe_src_rect(self.src_rect) // FIXME: check if this affects frame sets
             .draw(&*self.texture, draw_state, model, b);
 
         // for debug: anchor point
@@ -356,7 +397,7 @@ impl<I: ImageSize> Sprite<I> {
     }
 
     /// Draw this sprite and its children with color
-    pub fn draw_tinted<B: Graphics<Texture = I>>(&self, t: Matrix2d, b: &mut B, c: [f32;3]) {
+    pub fn draw_tinted<B: Graphics<Texture = I>>(&self, t: Matrix2d, b: &mut B, c: [f32; 3]) {
         use graphics::*;
 
         if !self.visible {
@@ -366,26 +407,37 @@ impl<I: ImageSize> Sprite<I> {
         let (tex_w, tex_h) = self.texture.get_size();
         let tex_w = tex_w as f64;
         let tex_h = tex_h as f64;
-        let source_rectangle = self.src_rect.unwrap_or({
-            let (w, h) = (tex_w, tex_h);
-            [0.0, 0.0, w as f64, h as f64]
-        });        
-        let anchor = [self.anchor[0] * source_rectangle[2], self.anchor[1] * source_rectangle[3]];
+        let source_rectangle = match self.frames {
+            None => self.src_rect.unwrap_or({
+                let (w, h) = (tex_w, tex_h);
+                [0.0, 0.0, w as f64, h as f64]
+            }),
+            Some(ref frame) => frame.source[self.frame_idx],
+        };
+        let anchor = [
+            self.anchor[0] * source_rectangle[2],
+            self.anchor[1] * source_rectangle[3],
+        ];
 
-        let transformed = t.trans(self.position[0], self.position[1])
-                           .rot_deg(self.rotation)
-                           .scale(self.scale[0], self.scale[1]);
+        let transformed = t
+            .trans(self.position[0], self.position[1])
+            .rot_deg(self.rotation)
+            .scale(self.scale[0], self.scale[1]);
 
         let mut model = transformed;
 
         if self.flip_x {
-            model = model.trans(source_rectangle[2] - 2.0 * anchor[0], 0.0).flip_h();
+            model = model
+                .trans(source_rectangle[2] - 2.0 * anchor[0], 0.0)
+                .flip_h();
         }
 
         if self.flip_y {
-            model = model.trans(0.0, source_rectangle[3] - 2.0 * anchor[1]).flip_v();
+            model = model
+                .trans(0.0, source_rectangle[3] - 2.0 * anchor[1])
+                .flip_v();
         }
-        
+
         let ref draw_state: graphics::DrawState = Default::default();
 
         // for debug: bounding_box
@@ -393,8 +445,13 @@ impl<I: ImageSize> Sprite<I> {
 
         graphics::Image::new()
             .color([c[0], c[1], c[2], self.opacity])
-            .rect([-anchor[0], -anchor[1], source_rectangle[2], source_rectangle[3]])
-            .maybe_src_rect(self.src_rect)
+            .rect([
+                -anchor[0],
+                -anchor[1],
+                source_rectangle[2],
+                source_rectangle[3],
+            ])
+            .maybe_src_rect(self.src_rect) // FIXME: check if this affects frame sets
             .draw(&*self.texture, draw_state, model, b);
 
         // for debug: anchor point
@@ -405,14 +462,89 @@ impl<I: ImageSize> Sprite<I> {
         }
     }
 
+    /// Update the frame delta and act accordingly
+    pub fn update(&mut self, dt: f64) {
+        if self.frames.is_some() {
+            let mut followup: Option<String> = None;
+            if let Some(ref frame) = self.frames {
+                self.frame_delta += dt;
+                if self.frame_delta > frame.frame_time {
+                    self.frame_delta = 0.0;
+                    if self.frame_idx == frame.source.len() - 1 {
+                        if let Some(ref next) = self.frames_followup {
+                            self.frame_idx = 0;
+                            followup = Some(next.clone());
+                        }
+                        if frame.repeat {
+                            self.frame_idx = 0;
+                        }
+                    }
+                }
+            }
+            if let Some(next) = followup {
+                self.play(&next, None);
+            }
+        }
+    }
+
+    /// Start an animated frameset
+    pub fn play(&mut self, name: &str, followup: Option<&str>) {
+        if self.frame_sets.contains_key(name) {
+            self.frames = Some(self.frame_sets.get(name).unwrap().clone());
+        }
+        match followup {
+            None => self.frames_followup = None,
+            Some(next) => self.frames_followup = Some(next.to_owned()),
+        }
+    }
+
+    /// Add an animated frameset
+    pub fn add_frameset(
+        &mut self,
+        name: &str,
+        repeat: bool,
+        frame_time: f64,
+        source: Vec<SourceRectangle>,
+    ) {
+        if !self.frame_sets.contains_key(name) {
+            self.frame_sets.insert(
+                name.to_owned(),
+                FrameSet {
+                    repeat: repeat,
+                    frame_time: frame_time,
+                    source: source,
+                },
+            );
+        }
+    }
+
+    /// Add an horizontal aligned animated frameset
+    pub fn add_frameset_horizontal(
+        &mut self,
+        name: &str,
+        repeat: bool,
+        frame_time: f64,
+        source: SourceRectangle,
+        count: u32,
+    ) {
+        let mut srcs: Vec<SourceRectangle> = Vec::new();
+        for i in 0..count {
+            let x = i as f64 * source[2];
+            srcs.push([x, source[1], source[2], source[3]]);
+        }
+        self.add_frameset(name, repeat, frame_time, srcs);
+    }
 
     /// Get the sprite's bounding box
     pub fn bounding_box(&self) -> graphics::types::Rectangle {
         let (w, h) = self.texture.get_size();
-        let source_rectangle = self.src_rect.unwrap_or({
-            let (sprite_w, sprite_h) = (w, h);
-            [0.0, 0.0, sprite_w as f64, sprite_h as f64]
-        });                
+        let source_rectangle = match self.frames {
+            None => self.src_rect.unwrap_or({
+                let (w, h) = (w, h);
+                [0.0, 0.0, w as f64, h as f64]
+            }),
+            Some(ref frame) => frame.source[self.frame_idx],
+        };
         let sprite_w = source_rectangle[2] * self.scale[0];
         let sprite_h = source_rectangle[3] * self.scale[1];
 
@@ -420,7 +552,7 @@ impl<I: ImageSize> Sprite<I> {
             self.position[0] - self.anchor[0] * sprite_w,
             self.position[1] - self.anchor[1] * sprite_h,
             sprite_w,
-            sprite_h
+            sprite_h,
         ]
     }
 }

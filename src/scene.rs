@@ -56,6 +56,7 @@ impl<I: ImageSize> Scene<I> {
 
                 let sprite = self.child_mut(id).unwrap();
                 let (status, _) = a.event(e, &mut |args| {
+                    sprite.update(args.dt);
                     let (state, status, remain) = {
                         let start_state;
                         let state = match *args.state {
